@@ -49,6 +49,8 @@ declare -A DRIVEID_TO_DEV  # Associative array with the drive id (e.g. GPTID) to
 DRIVEID_TYPE=              # Default for type used for drive IDs ('gptid' (CORE) or 'partuuid' (SCALE))
 DISK_PARM_TOOL=camcontrol  # Default disk parameter tool to use (camcontrol OR hdparm)
 OPERATION_MODE=disk        # Default operation mode (disk or zpool)
+READ_THRESHOLD=5000000
+WRITE_THRESHOLD=5000000
 
 ##
 # Prints the help/usage message
@@ -380,10 +382,11 @@ function get_idle_drives() {
 
             while read -r row; do
                 local poolname=$(echo "$row" | cut -d ' ' -f1)
-                local reads=$(echo "$row" | cut -d ' ' -f4)
-                local writes=$(echo "$row" | cut -d ' ' -f5)
-
-                if [ "$reads" != "0" ] || [ "$writes" != "0" ]; then
+                local reads=$(echo "$row" | cut -d ' ' -f6 | numfmt --from=iec)
+                local writes=$(echo "$row" | cut -d ' ' -f7 | numfmt --from=iec)
+			log_verbose "writes in bytes = $writes"
+			log_verbose "reads in bytes = $reads"
+                if [ "$reads" -gt "$READ_THRESHOLD" ] || [ "$writes" -gt "$WRITE_THRESHOLD" ]; then
                     ACTIVE_DRIVES="$ACTIVE_DRIVES ${DRIVES_BY_POOLS[$poolname]}"
                 fi
             done < <(tail -n +$((${#ZFSPOOLS[@]}+1)) <<< "${IOSTAT_OUTPUT}" | tr -s "\\t" " ")
@@ -582,8 +585,12 @@ function main() {
             if all_drives_are_idle "${IDLE_DRIVES}"; then
                 SHUTDOWN_COUNTER=$((SHUTDOWN_COUNTER - POLL_TIME))
                 if [[ ! ${SHUTDOWN_COUNTER} -gt 0 ]]; then
-                    log_verbose "Shutting down system"
-                    shutdown -p now
+                    if [[ $DRYRUN -eq 0 ]]; then  
+				log_verbose "Shutting down system"
+                    	shutdown -h now
+			  else
+                        log "Would shut down system now (dry run)."
+                    fi
                 fi
             else
                 SHUTDOWN_COUNTER=${SHUTDOWN_TIMEOUT}
