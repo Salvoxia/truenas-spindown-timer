@@ -49,8 +49,9 @@ declare -A DRIVEID_TO_DEV  # Associative array with the drive id (e.g. GPTID) to
 DRIVEID_TYPE=              # Default for type used for drive IDs ('gptid' (CORE) or 'partuuid' (SCALE))
 DISK_PARM_TOOL=camcontrol  # Default disk parameter tool to use (camcontrol OR hdparm)
 OPERATION_MODE=disk        # Default operation mode (disk or zpool)
-READ_THRESHOLD=5000000
-WRITE_THRESHOLD=5000000
+READ_THRESHOLD=0           # Default read threshold
+WRITE_THRESHOLD=0          # Default write threshold
+SHUTDOWN_ONLY=0            # Default shutdown only flag
 
 ##
 # Prints the help/usage message
@@ -58,7 +59,7 @@ WRITE_THRESHOLD=5000000
 function print_usage() {
     cat << EOF
 Usage:
-  $0 [-h] [-q] [-v] [-d] [-c] [-m] [-u <MODE>] [-t <TIMEOUT>] [-p <POLL_TIME>] [-i <DRIVE>] [-s <TIMEOUT>]
+  $0 [-h] [-q] [-v] [-d] [-c] [-m] [-u <MODE>] [-t <TIMEOUT>] [-p <POLL_TIME>] [-i <DRIVE>] [-s <TIMEOUT>] [-r <READ_THRESHOLD>] [-w <WRITE_THRESHOLD>]
 
 Monitors drive I/O and forces HDD spindown after a given idle period.
 Resistant to S.M.A.R.T. reads.
@@ -77,6 +78,8 @@ Options:
                  single monitoring period (default: 600).
   -s TIMEOUT   : Shutdown timeout. If given and no drive is active for TIMEOUT
                  seconds, the system will be shut down.
+  -o           : Shutdown only. Drives are never spun down, but activity is monitored
+                  to perform shutdown only. If specified, -s is mandatory.
   -u MODE      : Operation mode (default: disk).
                  If set to 'disk', the script operates with disk identifiers
                  (e.g. ada0) for all CLI arguments and monitors I/O using
@@ -99,6 +102,9 @@ Options:
   -q           : Quiet mode. Outputs are suppressed set.
   -v           : Verbose mode. Prints additional information during execution.
   -d           : Dry run. No actual spindown is performed.
+  -r           : Read threshold to define "idle". Drives are seen as "idle" if the 
+                  amount of reads within the timeout is below this threshold. Use IEC notation, e.g. 350K or 10M
+  -w           : Same as -r, but for writes.
   -h           : Print this help message.
 
 Example usage:
@@ -384,14 +390,21 @@ function get_idle_drives() {
                 local poolname=$(echo "$row" | cut -d ' ' -f1)
                 local reads=$(echo "$row" | cut -d ' ' -f6 | numfmt --from=iec)
                 local writes=$(echo "$row" | cut -d ' ' -f7 | numfmt --from=iec)
-			log_verbose "writes in bytes = $writes"
-			log_verbose "reads in bytes = $reads"
                 if [ "$reads" -gt "$READ_THRESHOLD" ] || [ "$writes" -gt "$WRITE_THRESHOLD" ]; then
                     ACTIVE_DRIVES="$ACTIVE_DRIVES ${DRIVES_BY_POOLS[$poolname]}"
                 fi
             done < <(tail -n +$((${#ZFSPOOLS[@]}+1)) <<< "${IOSTAT_OUTPUT}" | tr -s "\\t" " ")
         ;;
     esac
+
+     # now check for any ongoing SMART tests
+    for drive in $(get_drives); do
+        local SMARTCTL_OUTPUT=$(smartctl -a /dev/$drive | grep "progress" -i -A 1)
+        if [[ ! -z $SMARTCTL_OUTPUT ]] && [[ ! $ACTIVE_DRIVES == *"$drive"* ]]; then
+            ACTIVE_DRIVES="$ACTIVE_DRIVES $drive"
+        fi
+    done
+    
 
     # Remove active drives from list to get idle drives
     local IDLE_DRIVES=" $(get_drives) " # Space padding must be kept for pattern matching
@@ -528,6 +541,30 @@ function main() {
     fi
     log_verbose "Operation mode: $OPERATION_MODE"
 
+    # Verify shutdown only flag
+    if [[ $SHUTDOWN_ONLY -eq 1 ]] && [[ $SHUTDOWN_TIMEOUT -eq 0 ]]; then
+        log _error "If -o is specified, -s must be greater than 0!"
+        exit 1
+    fi
+    
+    
+    # Convert read and write threshold
+    READ_THRESHOLD=$(echo "$READ_THRESHOLD" | numfmt --from=iec)
+    WRITE_THRESHOLD=$(echo "$WRITE_THRESHOLD" | numfmt --from=iec)
+    if [ -z $READ_THRESHOLD ] || [ -z $WRITE_THRESHOLD ]; then
+        log_error "Invalid format for read or write threshold!"
+        print_usage
+        exit
+    fi
+
+    if [[ $SHUTDOWN_ONLY -eq 0 ]] && ([[ $READ_THRESHOLD -gt 0 ]] || [[ $WRITE_THRESHOLD -gt 0 ]]); then
+        log_error "-o must be set to use -r and -w, because these settings don't make sense for spinning down"
+        exit 1
+    fi
+
+    log_verbose "Read Threshold: $READ_THRESHOLD"
+    log_verbose "Write Threshold: $WRITE_THRESHOLD"
+
     # Determine disk parameter tool to use
     # (Differentiates between TrueNaS Core and TrueNAs SCALE)
     DISK_PARM_TOOL=$(detect_disk_parm_tool)
@@ -572,7 +609,9 @@ function main() {
 
                 if [[ ! ${DRIVE_TIMEOUTS[$drive]} -gt 0 ]]; then
                     DRIVE_TIMEOUTS[$drive]=${TIMEOUT}
-                    spindown_drive ${drive}
+                    if [[ ! $SHUTDOWN_ONLY -eq 0 ]]; then
+                        spindown_drive ${drive}
+                    fi
                 fi
             else
                 DRIVE_TIMEOUTS[$drive]=${TIMEOUT}
@@ -602,7 +641,7 @@ function main() {
 }
 
 # Parse arguments
-while getopts ":hqvdmct:p:i:s:u:" opt; do
+while getopts ":hqvdmoct:r:w:p:i:s:u:" opt; do
   case ${opt} in
     t ) TIMEOUT=${OPTARG}
       ;;
@@ -622,7 +661,13 @@ while getopts ":hqvdmct:p:i:s:u:" opt; do
       ;;
     m ) MANUAL_MODE=1
       ;;
+    o ) SHUTDOWN_ONLY=1
+      ;;
     u ) OPERATION_MODE=${OPTARG}
+      ;;
+    r ) READ_THRESHOLD=${OPTARG}
+      ;;
+    w ) WRITE_THRESHOLD=${OPTARG}
       ;;
     h ) print_usage; exit
       ;;
