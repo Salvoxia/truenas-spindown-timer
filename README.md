@@ -14,6 +14,12 @@
 _Monitors drive I/O and forces HDD spindown after a given idle period. Resistant
 to S.M.A.R.T. reads._
 
+## Disclaimer
+This is a fork [ngandrass/truenas-spindown-timer](https://github.com/ngandrass/truenas-spindown-timer) credit goes to them.
+This fork has been extended to identify ongoing S.M.A.R.T. tests and mark those drives as busy, as well as a read and write threshold of activity tolerated if the script is used as a shutdown timer.  
+New arguments have been introduced to control this behavior. Refer to [usage](#usage).  
+
+
 Disk spindown has always been an issue for various TrueNAS / FreeNAS users. This
 script utilizes `iostat` to detect I/O operations (reads, writes) on each disk.
 If a disk was neither read nor written for a given period of time, it is
@@ -73,6 +79,8 @@ Options:
                  single monitoring period (default: 600).
   -s TIMEOUT   : Shutdown timeout. If given and no drive is active for TIMEOUT
                  seconds, the system will be shut down.
+  -o           : Shutdown only. Drives are never spun down, but activity is monitored
+                  to perform shutdown only. If specified, -s is mandatory.
   -u MODE      : Operation mode (default: disk).
                  If set to 'disk', the script operates with disk identifiers
                  (e.g. ada0) for all CLI arguments and monitors I/O using
@@ -90,9 +98,14 @@ Options:
                  CAUTION: This inverts the -i option, which can then be used to
                  manually supply drives or zfs pools to monitor. All other drives
                  or zfs pools will be ignored.
+  -c           : Check mode. Outputs drive power state after each POLL_TIME
+                 seconds.
   -q           : Quiet mode. Outputs are suppressed set.
   -v           : Verbose mode. Prints additional information during execution.
   -d           : Dry run. No actual spindown is performed.
+  -r           : Read threshold to define "idle". Drives are seen as "idle" if the 
+                  amount of reads within the timeout is below this threshold. Use IEC notation, e.g. 350K or 10M
+  -w           : Same as -r, but for writes.
   -h           : Print this help message.
 
 Example usage:
@@ -333,7 +346,10 @@ the script if all monitored drives were idle for the specified number of
 seconds. This feature can be used to automatically shut down a system that might
 be woken via wake-on-LAN (WOL) later on.
 
-Setting `TIMEOUT` to 0 results in no shutdown.
+Setting `TIMEOUT` to 0 results in no shutdown.  
+
+If shutdown should happen even if there is frequent but light activity (caused by VMs or containers running in the background and doing their thing), a read and write threshold can be specified with `-r` and `-w`. The actual tolerated threshold is specified using IEC notiation, e.g., `-r 5M` tolerates up to 5 megabytes of reads within the timeout for a shutdown to happen anyway.  
+Since this function only makes sense for shutdown, these arguments are only effective if `-o` (shutdown only) is specified as well. This disables spindown functionality and concentrates on shutdown.
 
 
 ## Tested TrueNAS / FreeNAS versions
